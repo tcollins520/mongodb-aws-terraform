@@ -243,6 +243,3 @@ Sensitive values, private keys, passwords, tokens, and unredacted secrets must b
 
 Potential future improvements include scheduled and monitored backups, automated recovery validation, enhanced database monitoring and alerting, and documented operational runbooks.
 
-## Disclaimer
-
-This project is intended for technical learning, portfolio development, and hands-on practice with MongoDB administration on AWS. Production use requires additional workload-specific capacity planning, availability analysis, security review, backup-retention design, monitoring, and operational testing.
