@@ -1,0 +1,6 @@
+aws_region        = "us-east-1"
+project_name      = "mongodb-aws"
+environment       = "replica-set"
+vpc_cidr          = "10.20.0.0/16"
+availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
+subnet_cidrs       = ["10.20.10.0/24", "10.20.20.0/24", "10.20.30.0/24"]
