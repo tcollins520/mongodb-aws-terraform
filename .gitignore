@@ -32,3 +32,16 @@ override.tf.json
 *.key
 *.p12
 *.pfx
+
+# MongoDB TLS certificates and private keys
+pki/
+*.key
+*.pem
+*.p12
+*.pfx
+*.csr
+*.crt
+*.ext
+
+# MongoDB internal authentication keyfile
+rs0-keyfile
