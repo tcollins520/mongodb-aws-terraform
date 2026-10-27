@@ -749,7 +749,226 @@ Final observed state:
 -   That post-failover write was replicated to both `mongo-cs1` and
     `mongo-cs3`.
 
-## 12. Troubleshooting notes from the implementation
+## 12. Role-based access control (RBAC)
+
+RBAC was implemented and tested after replica-set replication and failover.
+The administrative account remains separate from application accounts.
+
+### 12.1 Users and intended permissions
+
+| User | Authentication database | Database access | Intended use |
+|---|---|---|---|
+| `siteAdmin` | `admin` | `root` role on `admin` | Administrative operations and controlled recovery |
+| `appUser` | `appdb` | `readWrite` on `appdb` | Application reads and writes |
+| `appReadOnly` | `appdb` | `read` on `appdb` | Read-only application/reporting access |
+
+Do not use `siteAdmin` for normal application traffic. Use a password
+prompt rather than placing a password in shell history or a README.
+
+### 12.2 Create the application users
+
+Connect to the current primary as `siteAdmin` using the authenticated
+TLS connection pattern from section 7. In `mongosh`, create the users in
+`appdb` (if a user already exists, inspect its roles rather than blindly
+recreating it):
+
+```javascript
+use appdb
+
+db.createUser({
+  user: "appUser",
+  pwd: passwordPrompt(),
+  roles: [{ role: "readWrite", db: "appdb" }]
+})
+
+db.createUser({
+  user: "appReadOnly",
+  pwd: passwordPrompt(),
+  roles: [{ role: "read", db: "appdb" }]
+})
+```
+
+The project implementation created/reset both users and verified their
+permissions. Keep the passwords out of source control and project logs.
+
+### 12.3 Create and populate the RBAC test collection
+
+As an administrator, the test collection was created in `appdb` with an
+initial document:
+
+```javascript
+use appdb
+
+db.rbacTest.insertOne({
+  test: "RBAC-validation",
+  createdAt: new Date(),
+  message: "Testing MongoDB role-based access control"
+})
+```
+
+Recorded `_id`: `6adfe480830d18e4522a9429`.
+
+### 12.4 Validate `appUser` read/write access
+
+Connect as `appUser` to the current primary, authenticating against
+`appdb`, with TLS CA validation enabled. At the `mongosh` prompt:
+
+```javascript
+use appdb
+
+db.rbacTest.find().toArray()
+
+db.rbacTest.insertOne({
+  test: "RBAC-readWrite-validation",
+  createdAt: new Date(),
+  user: "appUser"
+})
+```
+
+The read succeeded and the insert succeeded. Recorded inserted `_id`:
+`6adfec2ae269301a98c7e278`.
+
+### 12.5 Validate `appReadOnly` access denial
+
+Connect as `appReadOnly`, authenticating against `appdb`, and run:
+
+```javascript
+use appdb
+
+db.rbacTest.find().toArray()
+
+db.rbacTest.insertOne({
+  test: "RBAC-readOnly-write-denial",
+  createdAt: new Date(),
+  user: "appReadOnly"
+})
+```
+
+The read succeeded and the insert returned `MongoServerError[Unauthorized]`,
+as expected. This verified that `appReadOnly` can read `appdb` but cannot
+write to it. No document was inserted by the denied operation.
+
+### 12.6 RBAC outcome
+
+- `siteAdmin` remains the administrative account.
+- `appUser` can read and write in `appdb`.
+- `appReadOnly` can read `appdb` but cannot insert documents.
+- The application users have database-scoped roles rather than `root`.
+
+## 13. Backup and recovery: logical backup and restore test
+
+The logical backup and restore exercise completed successfully. The
+backup is currently stored locally on `mongo-cs2` in `/var/tmp`; this is
+a test backup, not yet a durable off-instance disaster-recovery copy.
+
+### 13.1 Backup strategy and location
+
+- Backup method: `mongodump` (logical backup).
+- Source database: `appdb`.
+- Backup directory on `mongo-cs2`: `/var/tmp/mongodb-backup-appdb`.
+- Linux account used: `dba`.
+- MongoDB Database Tools version: `100.19.1`.
+- Directory size at verification: `12K`.
+- TLS CA copy used by `dba`: `/home/dba/mongodb-pki/mongodb-ca.crt`.
+
+The CA certificate is public certificate material, not the CA private key.
+The CA private key must never be copied to an EC2 node or committed.
+
+### 13.2 Create the backup
+
+Run on `mongo-cs2` as Linux user `dba`. The recorded successful backup
+connected to the current primary `10.20.21.49` using `appUser`:
+
+```bash
+mongodump \
+  --host 10.20.21.49 \
+  --port 27017 \
+  --username appUser \
+  --authenticationDatabase appdb \
+  --db appdb \
+  --ssl \
+  --sslCAFile /home/dba/mongodb-pki/mongodb-ca.crt \
+  --out /var/tmp/mongodb-backup-appdb
+```
+
+Enter the password at the prompt. The successful output reported
+`appdb.rbacTest` and two documents dumped.
+
+### 13.3 Verify backup files and metadata
+
+```bash
+find /var/tmp/mongodb-backup-appdb -maxdepth 2 -type f -ls
+cat /var/tmp/mongodb-backup-appdb/appdb/rbacTest.metadata.json
+du -sh /var/tmp/mongodb-backup-appdb
+```
+
+Verified files:
+
+- `appdb/rbacTest.bson` — BSON document data (217 bytes).
+- `appdb/rbacTest.metadata.json` — collection metadata and `_id` index definition (175 bytes).
+- `appdb/prelude.json` — dump-format metadata (51 bytes).
+- Total directory size reported by `du`: `12K`.
+
+### 13.4 Restore to a separate test database
+
+The first restore attempt as `appUser` was rejected with `Unauthorized`
+when `mongorestore` attempted to list collections in
+`appdb_restore_test`. This was expected because `appUser` only has
+`readWrite` on `appdb`. The application user's permissions were not
+expanded. The restore was rerun successfully using `siteAdmin`:
+
+```bash
+mongorestore \
+  --host 10.20.21.49 \
+  --port 27017 \
+  --username siteAdmin \
+  --authenticationDatabase admin \
+  --ssl \
+  --sslCAFile /home/dba/mongodb-pki/mongodb-ca.crt \
+  --nsFrom='appdb.*' \
+  --nsTo='appdb_restore_test.*' \
+  /var/tmp/mongodb-backup-appdb
+```
+
+Enter the `siteAdmin` password at the prompt. The restore reported two
+documents restored and zero failures. `prelude.json` was skipped by the
+tool as informational dump-format metadata; the BSON data was restored.
+
+### 13.5 Validate the recovered collection
+
+Connect to the current primary using `mongosh` as `siteAdmin`, with TLS
+CA validation, then run:
+
+```javascript
+db.getSiblingDB("appdb_restore_test").rbacTest.countDocuments()
+
+db.getSiblingDB("appdb_restore_test").rbacTest.find().sort({_id: 1}).toArray()
+
+db.getSiblingDB("appdb_restore_test").rbacTest.getIndexes()
+```
+
+Verified results:
+
+- `countDocuments()` returned `2`.
+- Both original document IDs were preserved:
+  - `6adfe480830d18e4522a9429` (`RBAC-validation`).
+  - `6adfec2ae269301a98c7e278` (`RBAC-readWrite-validation`).
+- Original timestamps and document contents were present.
+- The `_id` index was present.
+- The live `appdb` database was not overwritten.
+
+### 13.6 Backup/recovery status and remaining work
+
+**Completed:** logical backup, file/metadata inspection, restore to a
+separate database, and document/index validation.
+
+**Not yet implemented or tested:** copying backups off the EC2 instance,
+encrypted durable storage (for example, a private S3 bucket), automated
+scheduling, retention/expiration, restore from an off-instance copy, and
+point-in-time recovery. The `/var/tmp` copy is on the database instance
+and should not be treated as durable disaster-recovery protection.
+
+## 14. Troubleshooting notes from the implementation
 
 ### `Unauthorized` while creating the first user
 
@@ -798,7 +1017,7 @@ sudo systemctl restart mongod
 sudo systemctl is-active mongod
 ```
 
-## 13. Security and cleanup checklist
+## 15. Security and cleanup checklist
 
 -   [ ] Verify and remove any temporary `/home/ec2-user/rs0-keyfile`
     copy on `mongo-cs1` if it still exists.
@@ -807,27 +1026,30 @@ sudo systemctl is-active mongod
 -   [ ] Never commit the CA private key, node private keys, keyfile,
     passwords, Terraform state, `.terraform/`, or real secret-bearing
     `.tfvars` files.
--   [ ] Create dedicated least-privilege application and read-only users
-    in the next RBAC phase.
+-   [x] Create and test the least-privilege `appUser` and `appReadOnly`
+    accounts for `appdb`.
 -   [ ] Verify private DNS/host resolution if hostnames will be used in
     the replica-set configuration.
 -   [ ] Consider reissuing certificates with loopback SANs if local TLS
     connections should not require hostname-check exceptions.
--   [ ] Complete backup/recovery and test an actual restore.
+-   [x] Complete a logical backup and restore into `appdb_restore_test`;
+    verify both documents and the `_id` index.
+-   [ ] Copy backups to durable off-instance storage and test recovery
+    from that copy.
+-   [ ] Implement backup scheduling and retention if required.
 -   [ ] Complete final security/operational validation.
 -   [ ] Implement sharding only after replica-set, RBAC,
     backup/recovery, and security validation.
 
-## 14. Next phases
+## 16. Next phases
 
-1.  **RBAC:** create a least-privilege application user and a separate
-    read-only user; test allowed and denied operations.
-2.  **Backup and recovery:** run a backup, validate its contents,
-    restore into a controlled target, and verify the restored data.
-3.  **Final security/operations:** review TLS, access control, key
+1.  **Durable backup/recovery:** copy backups off-instance to encrypted,
+    durable storage; define retention/scheduling and test restore from the
+    off-instance copy.
+2.  **Final security/operations:** review TLS, access control, key
     handling, network rules, and operational checks.
-4.  **Sharding:** implement at the end of the project, after the
-    replica-set and security milestones.
+3.  **Sharding:** implement at the end of the project, after the
+    replica-set, RBAC, and backup/recovery milestones.
 
 ## Appendix: Quick verification commands
 
@@ -858,5 +1080,9 @@ db.replicationCheck.find().pretty()
 ```
 
 **Current project state at last verification:** `mongo-cs2` was primary;
-`mongo-cs1` and `mongo-cs3` were healthy secondaries. The next
-phase is RBAC implementation.
+`mongo-cs1` and `mongo-cs3` were healthy secondaries. RBAC implementation
+and the local logical backup/restore validation are complete. Durable
+off-instance backups, scheduling/retention, final security/operations,
+and sharding remain future work. Replica-set primary-election behavior
+and the earlier intermittent connection timeouts are still candidates for
+a later investigation; do not infer a root cause from the recorded logs.
