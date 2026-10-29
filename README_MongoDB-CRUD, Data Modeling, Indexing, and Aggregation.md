@@ -1,11 +1,4 @@
-# MongoDB Learning Project: CRUD, Data Modeling, Indexing, and Aggregation
-
-A hands-on MongoDB Enterprise learning project built by running commands
-in `mongosh`, inspecting real results, and comparing MongoDB operations
-with familiar SQL patterns. This README is intended to grow with the
-exercises; it separates commands and outputs observed in the current
-airline-database work from additional reference examples that still need
-hands-on validation.
+# MongoDB Project: CRUD, Data Modeling, Indexing, and Aggregation
 
 > **Recorded environment for the airline exercises:** MongoDB Enterprise
 > 8.0.34, host `mongo-cs1`, port `27017`, replica set `rs0`; shell
